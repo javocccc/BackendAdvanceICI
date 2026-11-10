@@ -85,3 +85,13 @@ class CambioColegiatura(models.Model):
 
     class Meta:
         ordering = ["-fecha", "-id"]
+
+class RegistroAuditoria(models.Model):
+    expediente = models.ForeignKey(Expediente, on_delete=models.CASCADE, related_name="auditoria")
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    accion = models.CharField(max_length=80)
+    detalles = models.TextField(blank=True)
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-fecha", "-id"]  
