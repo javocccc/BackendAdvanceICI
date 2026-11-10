@@ -1,7 +1,45 @@
+from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 from rest_framework import serializers
 
 from .models import Acta, CambioColegiatura, Expediente, PerfilUsuario, RegistroAuditoria
 from .rut import normalizar_rut
+
+
+class CuentaSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source="usuario.email")
+    password = serializers.CharField(write_only=True, required=False, style={"input_type": "password"})
+
+    class Meta:
+        model = PerfilUsuario
+        fields = ["id", "email", "password", "nombre", "rol", "activo", "expediente"]
+
+    def validate_email(self, email):
+        email = email.strip().lower()
+        usuarios = get_user_model().objects.filter(email__iexact=email)
+        nombres_usuario = get_user_model().objects.filter(username__iexact=email)
+        if self.instance:
+            usuarios = usuarios.exclude(pk=self.instance.usuario_id)
+            nombres_usuario = nombres_usuario.exclude(pk=self.instance.usuario_id)
+        if usuarios.exists() or nombres_usuario.exists():
+            raise serializers.ValidationError("Ya existe una cuenta con este correo.")
+        return email
+
+    def validate(self, attrs):
+        if self.instance is None and not attrs.get("password"):
+            raise serializers.ValidationError({"password": "Indique una contraseña inicial."})
+        if attrs.get("password"):
+            validate_password(attrs["password"])
+        rol = attrs.get("rol", getattr(self.instance, "rol", None))
+        expediente = attrs.get("expediente", getattr(self.instance, "expediente", None))
+        if rol != PerfilUsuario.Rol.ESTUDIANTE and expediente:
+            raise serializers.ValidationError({"expediente": "Solo un estudiante puede vincular un expediente."})
+        if expediente and PerfilUsuario.objects.filter(expediente=expediente).exclude(
+            pk=self.instance.pk if self.instance else None
+        ).exists():
+            raise serializers.ValidationError({"expediente": "Este expediente ya está vinculado."})
+        return attrs
 
 
 class PerfilUsuarioSerializer(serializers.ModelSerializer):
