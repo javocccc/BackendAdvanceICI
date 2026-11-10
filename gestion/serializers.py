@@ -41,6 +41,33 @@ class CuentaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"expediente": "Este expediente ya está vinculado."})
         return attrs
 
+    @transaction.atomic
+    def create(self, validated_data):
+        email = validated_data.pop("usuario")["email"]
+        password = validated_data.pop("password")
+        usuario = get_user_model().objects.create_user(username=email, email=email, password=password)
+        perfil = usuario.perfil
+        for campo, valor in validated_data.items():
+            setattr(perfil, campo, valor)
+        perfil.save()
+        return perfil
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        email = validated_data.pop("usuario", {}).get("email")
+        password = validated_data.pop("password", None)
+        if email is not None:
+            instance.usuario.email = email
+            instance.usuario.username = email
+        if password:
+            instance.usuario.set_password(password)
+        if email is not None or password:
+            instance.usuario.save()
+        for campo, valor in validated_data.items():
+            setattr(instance, campo, valor)
+        instance.save()
+        return instance
+
 
 class PerfilUsuarioSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source="usuario.email", read_only=True)
