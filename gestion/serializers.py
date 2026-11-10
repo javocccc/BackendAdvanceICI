@@ -69,3 +69,23 @@ class ActaSerializer(serializers.ModelSerializer):
         if "archivo" in validated_data:
             instance.nombre_original = validated_data["archivo"].name
         return super().update(instance, validated_data)
+
+class CambioColegiaturaSerializer(serializers.ModelSerializer):
+    usuario = serializers.CharField(source="usuario.username", read_only=True)
+
+    class Meta:
+        model = CambioColegiatura
+        fields = ["id", "estado_anterior", "estado_nuevo", "fecha", "usuario", "observacion"]
+
+
+class NuevoEstadoColegiaturaSerializer(serializers.Serializer):
+    estado_nuevo = serializers.ChoiceField(choices=Expediente.EstadoColegiatura.choices)
+    observacion = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+
+
+class RegistroAuditoriaSerializer(serializers.ModelSerializer):
+    usuario = serializers.CharField(source="usuario.username", read_only=True)
+
+    class Meta:
+        model = RegistroAuditoria
+        fields = ["id", "usuario", "accion", "detalles", "fecha"]
