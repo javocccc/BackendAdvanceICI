@@ -3,7 +3,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Acta, CambioColegiatura, Expediente, PerfilUsuario, RegistroAuditoria
+from .models import Acta, CambioColegiatura, ConfiguracionSistema, Expediente, PerfilUsuario, RegistroAuditoria
 from .rut import normalizar_rut
 
 
@@ -80,6 +80,13 @@ class CambiarClaveSerializer(serializers.Serializer):
     def validate_clave_nueva(self, valor):
         validate_password(valor, user=self.context["request"].user)
         return valor
+
+
+class ConfiguracionSistemaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConfiguracionSistema
+        fields = ["mantenimiento", "mensaje", "actualizado"]
+        read_only_fields = ["actualizado"]
 
 
 class PerfilUsuarioSerializer(serializers.ModelSerializer):

@@ -7,11 +7,16 @@ from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
-from .models import Expediente, PerfilUsuario
+from .models import ConfiguracionSistema, Expediente, PerfilUsuario
 from .rut import normalizar_rut
-from .serializers import CambiarClaveSerializer, CuentaSerializer, ImportarCuentasSerializer
+from .serializers import (
+    CambiarClaveSerializer,
+    ConfiguracionSistemaSerializer,
+    CuentaSerializer,
+    ImportarCuentasSerializer,
+)
 
 class EsAdministradorActivo(BasePermission):
     def has_permission(self, request, view):
@@ -102,4 +107,23 @@ class CambiarClaveView(generics.GenericAPIView):
         usuario.save(update_fields=["password"])
         update_session_auth_hash(request, usuario)
         return Response({"detalle": "Contraseña actualizada."})
+
+
+class EstadoSistemaView(generics.GenericAPIView):
+    serializer_class = ConfiguracionSistemaSerializer
+
+    def get_permissions(self):
+        return [AllowAny()] if self.request.method == "GET" else [EsAdministradorActivo()]
+
+    def get(self, request):
+        estado, _ = ConfiguracionSistema.objects.get_or_create(pk=1)
+        return Response(ConfiguracionSistemaSerializer(estado).data)
+
+    def put(self, request):
+        estado, _ = ConfiguracionSistema.objects.get_or_create(pk=1)
+        datos = self.get_serializer(estado, data=request.data)
+        datos.is_valid(raise_exception=True)
+        datos.save()
+        return Response(datos.data)
+
 
