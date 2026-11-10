@@ -107,3 +107,33 @@ class ExpedienteAPITests(TestCase):
         archivo = SimpleUploadedFile("acta.pdf", b"no-es-pdf", content_type="application/pdf")
         respuesta = self.client.post("/api/actas/", {"expediente": self.expediente.pk, "archivo": archivo}, format="multipart")
         self.assertEqual(respuesta.status_code, 400)
+
+    def test_cuentas_reservadas_a_administracion(self):
+        self.client.force_authenticate(self.coordinador)
+        self.assertEqual(self.client.get("/api/cuentas/").status_code, 403)
+        self.client.force_authenticate(self.admin)
+        datos = {"email": "nuevo@example.com", "password": "ClaveNueva123!", "nombre": "Alumno Nuevo",
+                 "rol": "estudiante", "activo": True, "expediente": self.otro.pk}
+        creado = self.client.post("/api/cuentas/", datos)
+        self.assertEqual(creado.status_code, 201, creado.data)
+        self.assertNotIn("password", creado.data)
+        self.assertEqual(PerfilUsuario.objects.get(pk=creado.data["id"]).expediente_id, self.otro.pk)
+        self.assertEqual(self.client.delete(f"/api/cuentas/{creado.data['id']}/").status_code, 204)
+
+    def test_importacion_csv_y_clave(self):
+        self.client.force_authenticate(self.admin)
+        archivo = SimpleUploadedFile("alumnos.csv", b"nombre,email,rut\nPrueba,prueba@example.com,\n", content_type="text/csv")
+        respuesta = self.client.post("/api/cuentas/importar/", {"archivo": archivo}, format="multipart")
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+        self.assertIn("clave_temporal", respuesta.data["resultados"][0])
+        self.assertTrue(get_user_model().objects.filter(email="prueba@example.com").exists())
+
+    def test_estado_publico_y_edicion_admin(self):
+        self.assertEqual(self.client.get("/api/estado/").status_code, 200)
+        self.client.force_authenticate(self.coordinador)
+        self.assertEqual(self.client.put("/api/estado/", {"mantenimiento": True}).status_code, 403)
+        self.client.force_authenticate(self.admin)
+        respuesta = self.client.put("/api/estado/", {"mantenimiento": True, "mensaje": "Pausa"})
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+        self.assertTrue(respuesta.data["mantenimiento"])
+

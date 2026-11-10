@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Acta, CambioColegiatura, Expediente, PerfilUsuario, RegistroAuditoria
+from .models import Acta, CambioColegiatura, ConfiguracionSistema, Expediente, PerfilUsuario, RegistroAuditoria
 
 
 @admin.register(Expediente)
@@ -16,7 +16,7 @@ class PerfilUsuarioAdmin(admin.ModelAdmin):
     list_filter = ("rol", "activo")
 
 
-
 admin.site.register(Acta)
 admin.site.register(CambioColegiatura)
 admin.site.register(RegistroAuditoria)
+admin.site.register(ConfiguracionSistema)
