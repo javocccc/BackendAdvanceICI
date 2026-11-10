@@ -73,6 +73,15 @@ class ImportarCuentasSerializer(serializers.Serializer):
     archivo = serializers.FileField()
 
 
+class CambiarClaveSerializer(serializers.Serializer):
+    clave_actual = serializers.CharField(style={"input_type": "password"})
+    clave_nueva = serializers.CharField(style={"input_type": "password"})
+
+    def validate_clave_nueva(self, valor):
+        validate_password(valor, user=self.context["request"].user)
+        return valor
+
+
 class PerfilUsuarioSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source="usuario.email", read_only=True)
     expediente_id = serializers.IntegerField(source="expediente.id", read_only=True)
