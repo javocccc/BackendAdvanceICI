@@ -74,3 +74,14 @@ class Acta(models.Model):
 
     def __str__(self):
         return f"Acta de {self.expediente.rut}"
+
+class CambioColegiatura(models.Model):
+    expediente = models.ForeignKey(Expediente, on_delete=models.CASCADE, related_name="historial_colegiatura")
+    estado_anterior = models.CharField(max_length=12, choices=Expediente.EstadoColegiatura.choices)
+    estado_nuevo = models.CharField(max_length=12, choices=Expediente.EstadoColegiatura.choices)
+    fecha = models.DateTimeField(auto_now_add=True)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    observacion = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-fecha", "-id"]
