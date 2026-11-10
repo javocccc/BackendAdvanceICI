@@ -94,4 +94,14 @@ class RegistroAuditoria(models.Model):
     fecha = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-fecha", "-id"]  
+        ordering = ["-fecha", "-id"]
+
+
+class ConfiguracionSistema(models.Model):
+    mantenimiento = models.BooleanField(default=False)
+    mensaje = models.CharField(max_length=300, blank=True)
+    actualizado = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return "Estado de Advance ICI"
+
