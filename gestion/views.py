@@ -78,7 +78,53 @@ class ExpedienteViewSet(viewsets.ModelViewSet):
         return Expediente.objects.all()
 
     def perform_create(self, serializer):
-        serializer.save(creado_por=self.request.user)
+        expediente = serializer.save(creado_por=self.request.user)
+        RegistroAuditoria.objects.create(
+            expediente=expediente, usuario=self.request.user, accion="creacion", detalles="Expediente creado"
+        )
+
+    def perform_update(self, serializer):
+        expediente = serializer.save()
+        RegistroAuditoria.objects.create(
+            expediente=expediente, usuario=self.request.user, accion="edicion", detalles="Expediente editado"
+        )
+
+    @action(detail=True, methods=["post"], url_path="colegiatura", serializer_class=NuevoEstadoColegiaturaSerializer)
+    def cambiar_colegiatura(self, request, pk=None):
+        if request.user.perfil.rol != PerfilUsuario.Rol.ADMINISTRADOR:
+            raise PermissionDenied("Solo Administración puede cambiar la colegiatura.")
+        datos = self.get_serializer(data=request.data)
+        datos.is_valid(raise_exception=True)
+        with transaction.atomic():
+            expediente = Expediente.objects.select_for_update().get(pk=self.get_object().pk)
+            anterior = expediente.colegiatura
+            nuevo = datos.validated_data["estado_nuevo"]
+            if anterior == nuevo:
+                raise ValidationError("El estado nuevo debe ser distinto del actual.")
+            expediente.colegiatura = nuevo
+            expediente.fecha_colegiatura = timezone.localdate()
+            expediente.save(update_fields=["colegiatura", "fecha_colegiatura", "fecha_actualizacion"])
+            cambio = CambioColegiatura.objects.create(
+                expediente=expediente, estado_anterior=anterior, estado_nuevo=nuevo,
+                usuario=request.user, observacion=datos.validated_data.get("observacion", ""),
+            )
+            RegistroAuditoria.objects.create(
+                expediente=expediente, usuario=request.user, accion="colegiatura",
+                detalles=f"{anterior} → {nuevo}",
+            )
+        return Response(CambioColegiaturaSerializer(cambio).data)
+
+    @action(detail=True, methods=["get"], url_path="historial-colegiatura")
+    def historial_colegiatura(self, request, pk=None):
+        expediente = self.get_object()
+        return Response(CambioColegiaturaSerializer(expediente.historial_colegiatura.all(), many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="auditoria")
+    def auditoria(self, request, pk=None):
+        expediente = self.get_object()
+        if request.user.perfil.rol == PerfilUsuario.Rol.ESTUDIANTE:
+            raise PermissionDenied("El historial de auditoría es interno.")
+        return Response(RegistroAuditoriaSerializer(expediente.auditoria.all(), many=True).data)
 
 
 class PerfilActualView(generics.RetrieveAPIView):
