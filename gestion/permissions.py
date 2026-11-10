@@ -19,3 +19,9 @@ class PermisoExpediente(BasePermission):
         if perfil.rol == PerfilUsuario.Rol.ESTUDIANTE:
             return request.method in SAFE_METHODS and perfil.expediente_id == obj.id
         return True
+class PermisoActa(PermisoExpediente):
+    def has_object_permission(self, request, view, obj):
+        perfil = request.user.perfil
+        if perfil.rol == PerfilUsuario.Rol.ESTUDIANTE:
+            return request.method in SAFE_METHODS and perfil.expediente_id == obj.expediente_id
+        return True
