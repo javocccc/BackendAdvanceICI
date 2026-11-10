@@ -1,7 +1,13 @@
+import shutil
+import tempfile
 from datetime import date
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from rest_framework.test import APIClient
+
+from .models import Acta, CambioColegiatura, Expediente, PerfilUsuario, RegistroAuditoria
 from rest_framework.test import APIClient
 
 from .models import Expediente, PerfilUsuario
@@ -68,3 +74,36 @@ class ExpedienteAPITests(TestCase):
         respuesta = self.client.get("/api/expedientes/?page=1")
         self.assertEqual(respuesta.status_code, 200)
         self.assertIn("results", respuesta.data)
+
+
+
+        
+    def test_solo_administracion_cambia_colegiatura(self):
+        url = f"/api/expedientes/{self.expediente.pk}/colegiatura/"
+        self.client.force_authenticate(self.coordinador)
+        self.assertEqual(self.client.post(url, {"estado_nuevo": "al-dia"}).status_code, 403)
+        self.client.force_authenticate(self.admin)
+        respuesta = self.client.post(url, {"estado_nuevo": "al-dia", "observacion": "Pago registrado"})
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+        self.assertEqual(CambioColegiatura.objects.filter(expediente=self.expediente).count(), 1)
+        self.assertEqual(self.client.get(f"/api/expedientes/{self.expediente.pk}/historial-colegiatura/").data[0]["estado_nuevo"], "al-dia")
+        self.assertTrue(RegistroAuditoria.objects.filter(expediente=self.expediente, accion="colegiatura").exists())
+
+    def test_acta_pdf_y_descarga(self):
+        carpeta = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, carpeta, True)
+        with override_settings(MEDIA_ROOT=carpeta):
+            self.client.force_authenticate(self.coordinador)
+            archivo = SimpleUploadedFile("acta.pdf", b"%PDF-1.4\ncontenido", content_type="application/pdf")
+            respuesta = self.client.post("/api/actas/", {"expediente": self.expediente.pk, "archivo": archivo}, format="multipart")
+            self.assertEqual(respuesta.status_code, 201, respuesta.data)
+            self.assertEqual(Acta.objects.count(), 1)
+            self.client.force_authenticate(self.estudiante)
+            self.assertEqual(self.client.get(f"/api/actas/{respuesta.data['id']}/descargar/").status_code, 200)
+            self.assertEqual(self.client.delete(f"/api/actas/{respuesta.data['id']}/").status_code, 403)
+
+    def test_rechaza_acta_contenido_invalido(self):
+        self.client.force_authenticate(self.admin)
+        archivo = SimpleUploadedFile("acta.pdf", b"no-es-pdf", content_type="application/pdf")
+        respuesta = self.client.post("/api/actas/", {"expediente": self.expediente.pk, "archivo": archivo}, format="multipart")
+        self.assertEqual(respuesta.status_code, 400)

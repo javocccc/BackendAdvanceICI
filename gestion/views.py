@@ -136,3 +136,18 @@ class PerfilActualView(generics.RetrieveAPIView):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("La cuenta está desactivada.")
         return perfil
+
+
+
+class ResumenView(generics.GenericAPIView):
+    permission_classes = [PermisoExpediente]
+
+    def get(self, request):
+        if request.user.perfil.rol == PerfilUsuario.Rol.ESTUDIANTE:
+            raise PermissionDenied("El resumen es para el personal del sistema.")
+        datos = Expediente.objects.aggregate(
+            total=Count("id"),
+            pendientes_colegiatura=Count("id", filter=Q(colegiatura__in=["no-al-dia", "sin-informar"])),
+            pendientes_acta=Count("id", filter=Q(acta__isnull=True)),
+        )
+        return Response(datos)
