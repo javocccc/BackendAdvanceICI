@@ -69,6 +69,10 @@ class CuentaSerializer(serializers.ModelSerializer):
         return instance
 
 
+class ImportarCuentasSerializer(serializers.Serializer):
+    archivo = serializers.FileField()
+
+
 class PerfilUsuarioSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source="usuario.email", read_only=True)
     expediente_id = serializers.IntegerField(source="expediente.id", read_only=True)
