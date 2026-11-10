@@ -1,3 +1,4 @@
+from uuid import uuid4
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
@@ -57,3 +58,19 @@ class Expediente(models.Model):
 
     def __str__(self):
         return f"{self.rut} · {self.nombre}"
+    
+
+def ruta_acta(instance, filename):
+    # Un nombre aleatorio evita colisiones y no expone el nombre entregado por el usuario.
+    return f"actas/{instance.expediente_id}/{uuid4().hex}.pdf"
+
+
+class Acta(models.Model):
+    expediente = models.OneToOneField(Expediente, on_delete=models.CASCADE, related_name="acta")
+    archivo = models.FileField(upload_to=ruta_acta)
+    nombre_original = models.CharField(max_length=255)
+    fecha_carga = models.DateTimeField(auto_now_add=True)
+    cargada_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+
+    def __str__(self):
+        return f"Acta de {self.expediente.rut}"
