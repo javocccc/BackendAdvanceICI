@@ -31,6 +31,8 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "advance_ici.urls"
+# El formulario de acceso de DRF debe volver a la API navegable.
+LOGIN_REDIRECT_URL = "/api/"
 TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [],
