@@ -1,3 +1,4 @@
+from pathlib import Path
 from uuid import uuid4
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
@@ -74,6 +75,28 @@ class Acta(models.Model):
 
     def __str__(self):
         return f"Acta de {self.expediente.rut}"
+
+
+def ruta_documento(instance, filename):
+    # La extensión se conserva; el nombre físico aleatorio evita colisiones.
+    extension = Path(filename).suffix.lower()
+    return f"documentos/{instance.expediente_id}/{uuid4().hex}{extension}"
+
+
+class DocumentoExpediente(models.Model):
+    expediente = models.ForeignKey(Expediente, on_delete=models.CASCADE, related_name="documentos")
+    archivo = models.FileField(upload_to=ruta_documento)
+    nombre_original = models.CharField(max_length=255)
+    tipo = models.CharField(max_length=10)
+    tamano = models.PositiveIntegerField()
+    fecha_carga = models.DateTimeField(auto_now_add=True)
+    cargado_por = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        ordering = ["-fecha_carga", "-id"]
+
+    def __str__(self):
+        return f"{self.nombre_original} · {self.expediente.rut}"
 
 class CambioColegiatura(models.Model):
     expediente = models.ForeignKey(Expediente, on_delete=models.CASCADE, related_name="historial_colegiatura")

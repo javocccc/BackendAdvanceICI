@@ -3,11 +3,12 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from gestion.cuentas import CambiarClaveView, CuentaViewSet, EstadoSistemaView
-from gestion.views import ActaViewSet, ExpedienteViewSet, PerfilActualView, ResumenView
+from gestion.views import ActaViewSet, DocumentoExpedienteViewSet, ExpedienteViewSet, PerfilActualView, ResumenView
 
 router = DefaultRouter()
 router.register("expedientes", ExpedienteViewSet, basename="expediente")
 router.register("actas", ActaViewSet, basename="acta")
+router.register("documentos", DocumentoExpedienteViewSet, basename="documento")
 router.register("cuentas", CuentaViewSet, basename="cuenta")
 
 urlpatterns = [

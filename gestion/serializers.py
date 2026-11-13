@@ -1,13 +1,32 @@
+from collections.abc import Mapping
+from decimal import Decimal
+import unicodedata
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Acta, CambioColegiatura, ConfiguracionSistema, Expediente, PerfilUsuario, RegistroAuditoria
+from .models import Acta, CambioColegiatura, ConfiguracionSistema, DocumentoExpediente, Expediente, PerfilUsuario, RegistroAuditoria
 from .rut import normalizar_rut
 
 
-class CuentaSerializer(serializers.ModelSerializer):
+class CamposJsonEsperadosMixin:
+    """Informa las claves JSON desconocidas en vez de ignorarlas al guardar."""
+
+    def to_internal_value(self, data):
+        request = self.context.get("request")
+        if request and request.content_type.split(";", 1)[0].lower() == "application/json" and isinstance(data, Mapping):
+            escribibles = {campo.field_name for campo in self._writable_fields}
+            extras = set(data) - escribibles
+            if extras:
+                raise serializers.ValidationError({
+                    nombre: ["Campo no admitido por este endpoint."] for nombre in sorted(extras)
+                })
+        return super().to_internal_value(data)
+
+
+class CuentaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
     email = serializers.EmailField(source="usuario.email")
     password = serializers.CharField(write_only=True, required=False, style={"input_type": "password"})
 
@@ -73,7 +92,7 @@ class ImportarCuentasSerializer(serializers.Serializer):
     archivo = serializers.FileField()
 
 
-class CambiarClaveSerializer(serializers.Serializer):
+class CambiarClaveSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
     clave_actual = serializers.CharField(style={"input_type": "password"})
     clave_nueva = serializers.CharField(style={"input_type": "password"})
 
@@ -82,7 +101,7 @@ class CambiarClaveSerializer(serializers.Serializer):
         return valor
 
 
-class ConfiguracionSistemaSerializer(serializers.ModelSerializer):
+class ConfiguracionSistemaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
     class Meta:
         model = ConfiguracionSistema
         fields = ["mantenimiento", "mensaje", "actualizado"]
@@ -98,10 +117,18 @@ class PerfilUsuarioSerializer(serializers.ModelSerializer):
         fields = ["id", "email", "nombre", "rol", "activo", "expediente_id"]
 
 
-class ExpedienteSerializer(serializers.ModelSerializer):
+class ExpedienteSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
     acta_id = serializers.IntegerField(source="acta.id", read_only=True)
     estudiante = PerfilUsuarioSerializer(source="perfil_estudiante", read_only=True)
     creado_por = serializers.CharField(source="creado_por.username", read_only=True)
+    # La normalización se realiza antes de validar el formato y la unicidad del RUT.
+    rut = serializers.CharField(max_length=12)
+    nota_examen = serializers.DecimalField(
+        max_digits=2, decimal_places=1, min_value=Decimal("1.0"), max_value=Decimal("7.0")
+    )
+    profesor_guia = serializers.CharField(max_length=180)
+    informante_1 = serializers.CharField(max_length=180)
+    informante_2 = serializers.CharField(max_length=180)
 
     class Meta:
         model = Expediente
@@ -114,13 +141,36 @@ class ExpedienteSerializer(serializers.ModelSerializer):
         read_only_fields = ["colegiatura", "fecha_colegiatura"]
 
     def validate_rut(self, valor):
-        return normalizar_rut(valor)
+        normalizado = normalizar_rut(valor)
+        existentes = Expediente.objects.filter(rut=normalizado)
+        if self.instance is not None:
+            existentes = existentes.exclude(pk=self.instance.pk)
+        if existentes.exists():
+            raise serializers.ValidationError("Ya existe un expediente con ese RUT.")
+        return normalizado
+
+    def validate_nombre(self, valor):
+        # Los nombres de personas admiten tildes y signos habituales, pero no cifras.
+        signos = {" ", "-", "'", "’", "."}
+        if not any(letra.isalpha() for letra in valor) or any(
+            not (letra.isalpha() or letra in signos) for letra in valor
+        ):
+            raise serializers.ValidationError(
+                "El nombre solo puede contener letras, espacios, guiones, apóstrofos y puntos."
+            )
+        return valor
 
     def validate(self, attrs):
         # La comisión de examen no puede repetir a un docente en dos puestos.
         campos = ("profesor_guia", "informante_1", "informante_2", "informante_adicional")
         nombres = [attrs.get(campo, getattr(self.instance, campo, "")) for campo in campos]
-        presentes = [nombre.strip().casefold() for nombre in nombres if nombre.strip()]
+        presentes = [
+            "".join(
+                letra for letra in unicodedata.normalize("NFD", " ".join(nombre.split()).casefold())
+                if not unicodedata.combining(letra)
+            ).strip()
+            for nombre in nombres if nombre.strip()
+        ]
         if len(presentes) != len(set(presentes)):
             raise serializers.ValidationError("Un docente aparece más de una vez en la comisión.")
         return attrs
@@ -142,7 +192,10 @@ class ActaSerializer(serializers.ModelSerializer):
         return archivo
 
     def validate_expediente(self, expediente):
-        if self.instance is None and Acta.objects.filter(expediente=expediente).exists():
+        existentes = Acta.objects.filter(expediente=expediente)
+        if self.instance is not None:
+            existentes = existentes.exclude(pk=self.instance.pk)
+        if existentes.exists():
             raise serializers.ValidationError("Este expediente ya tiene un acta; edite la existente.")
         return expediente
 
@@ -155,6 +208,33 @@ class ActaSerializer(serializers.ModelSerializer):
             instance.nombre_original = validated_data["archivo"].name
         return super().update(instance, validated_data)
 
+
+class DocumentoExpedienteSerializer(serializers.ModelSerializer):
+    cargado_por = serializers.CharField(source="cargado_por.username", read_only=True)
+
+    class Meta:
+        model = DocumentoExpediente
+        fields = ["id", "expediente", "archivo", "nombre_original", "tipo", "tamano", "fecha_carga", "cargado_por"]
+        read_only_fields = fields
+
+
+class CargaDocumentosSerializer(serializers.Serializer):
+    archivos = serializers.ListField(
+        child=serializers.FileField(), min_length=1, max_length=20,
+        style={"template": "gestion/multiple_file_input.html"},
+    )
+    expedientes = serializers.CharField(
+        help_text="IDs de destino separados por comas, uno por archivo y en el mismo orden."
+    )
+
+
+class CargaDocumentosExpedienteSerializer(serializers.Serializer):
+    archivos = serializers.ListField(
+        child=serializers.FileField(), min_length=1, max_length=20,
+        style={"template": "gestion/multiple_file_input.html"},
+    )
+
+
 class CambioColegiaturaSerializer(serializers.ModelSerializer):
     usuario = serializers.CharField(source="usuario.username", read_only=True)
 
@@ -163,7 +243,7 @@ class CambioColegiaturaSerializer(serializers.ModelSerializer):
         fields = ["id", "estado_anterior", "estado_nuevo", "fecha", "usuario", "observacion"]
 
 
-class NuevoEstadoColegiaturaSerializer(serializers.Serializer):
+class NuevoEstadoColegiaturaSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
     estado_nuevo = serializers.ChoiceField(choices=Expediente.EstadoColegiatura.choices)
     observacion = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 
