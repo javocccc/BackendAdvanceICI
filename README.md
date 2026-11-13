@@ -12,7 +12,9 @@ py -m venv .venv
 .\.venv\Scripts\python.exe manage.py runserver
 ```
 
-Abrir `http://127.0.0.1:8000/api/`. Iniciar sesión en `http://127.0.0.1:8000/api-auth/login/` con usuario `root` y clave `123456`. `cargar_demo` prepara las cuentas y dos expedientes ficticios solo en la base local.
+Si `py` no está disponible, usar `python -m venv .venv`. Si `.venv` ya existe, comenzar en la instalación de dependencias.
+
+Abrir `http://127.0.0.1:8000/api/`. Iniciar sesión en `http://127.0.0.1:8000/api-auth/login/` con usuario `root` y clave `123456`. `cargar_demo` prepara las cuentas y tres expedientes ficticios solo en la base local.
 
 ## Rutas principales
 
