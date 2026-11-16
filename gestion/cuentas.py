@@ -9,6 +9,9 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
+from .formato_raw import (
+    AdjuntosMultiPartParser, JSONClaveParser, JSONCuentaParser, JSONEstadoSistemaParser,
+)
 from .models import ConfiguracionSistema, Expediente, PerfilUsuario
 from .rut import normalizar_rut
 from .serializers import (
@@ -28,6 +31,7 @@ class CuentaViewSet(viewsets.ModelViewSet):
     queryset = PerfilUsuario.objects.select_related("usuario", "expediente").all().order_by("nombre", "id")
     serializer_class = CuentaSerializer
     permission_classes = [EsAdministradorActivo]
+    parser_classes = [JSONCuentaParser, FormParser, MultiPartParser]
     filterset_fields = ["rol", "activo"]
     search_fields = ["nombre", "usuario__email"]
 
@@ -36,8 +40,10 @@ class CuentaViewSet(viewsets.ModelViewSet):
         if perfil.usuario_id == self.request.user.id:
             rol = serializer.validated_data.get("rol", perfil.rol)
             activo = serializer.validated_data.get("activo", perfil.activo)
-            if rol != PerfilUsuario.Rol.ADMINISTRADOR or not activo:
-                raise ValidationError("No puede quitarse su propio acceso de Administrador.")
+            if rol != PerfilUsuario.Rol.ADMINISTRADOR:
+                raise ValidationError({"rol": "No puede quitarse su propio acceso de Administrador."})
+            if not activo:
+                raise ValidationError({"activo": "No puede desactivar su propia cuenta de Administrador."})
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -46,23 +52,25 @@ class CuentaViewSet(viewsets.ModelViewSet):
         instance.usuario.delete()
 
     @action(detail=False, methods=["post"], url_path="importar", serializer_class=ImportarCuentasSerializer,
-            parser_classes=[MultiPartParser, FormParser])
+            parser_classes=[AdjuntosMultiPartParser, FormParser])
     def importar(self, request):
         datos = self.get_serializer(data=request.data)
         datos.is_valid(raise_exception=True)
         archivo = datos.validated_data["archivo"]
+        if not archivo.name.lower().endswith(".csv"):
+            raise ValidationError({"archivo": "Adjunte un archivo con extensión .csv."})
         if archivo.size > 1024 * 1024:
-            raise ValidationError("El CSV no puede superar 1 MB.")
+            raise ValidationError({"archivo": "El CSV no puede superar 1 MB."})
         try:
             contenido = archivo.read().decode("utf-8-sig")
         except UnicodeDecodeError as error:
-            raise ValidationError("El CSV debe estar codificado en UTF-8.") from error
+            raise ValidationError({"archivo": "El CSV debe estar codificado en UTF-8."}) from error
         lector = csv.DictReader(io.StringIO(contenido))
         if lector.fieldnames != ["nombre", "email", "rut"]:
-            raise ValidationError("Las columnas deben ser exactamente nombre,email,rut.")
+            raise ValidationError({"archivo": "Las columnas deben ser exactamente nombre,email,rut."})
         filas = list(lector)
         if len(filas) > 200:
-            raise ValidationError("Se admiten hasta 200 estudiantes por archivo.")
+            raise ValidationError({"archivo": "Se admiten hasta 200 estudiantes por archivo."})
         resultados = []
         correos_csv = set()
         for numero, fila in enumerate(filas, start=2):
@@ -99,6 +107,7 @@ class CuentaViewSet(viewsets.ModelViewSet):
 
 class CambiarClaveView(generics.GenericAPIView):
     serializer_class = CambiarClaveSerializer
+    parser_classes = [JSONClaveParser, FormParser, MultiPartParser]
 
     def post(self, request):
         datos = self.get_serializer(data=request.data)
@@ -114,6 +123,7 @@ class CambiarClaveView(generics.GenericAPIView):
 
 class EstadoSistemaView(generics.GenericAPIView):
     serializer_class = ConfiguracionSistemaSerializer
+    parser_classes = [JSONEstadoSistemaParser, FormParser, MultiPartParser]
 
     def get_permissions(self):
         return [AllowAny()] if self.request.method == "GET" else [EsAdministradorActivo()]

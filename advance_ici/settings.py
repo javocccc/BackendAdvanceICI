@@ -59,6 +59,8 @@ USE_TZ = True
 STATIC_URL = "static/"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
+# Un PDF de 10 MB codificado en Base64 ocupa cerca de 14 MB en una petición JSON.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 15 * 1024 * 1024
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {

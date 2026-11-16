@@ -1,28 +1,64 @@
+import base64
+import binascii
 from collections.abc import Mapping
 from decimal import Decimal
+from pathlib import Path
 import unicodedata
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.validators import EmailValidator, MaxLengthValidator, MinLengthValidator
 from django.db import transaction
 from rest_framework import serializers
 
+from .documentos import EXTENSIONES, MAX_ARCHIVOS, MAX_BYTES_ARCHIVO, validar_documento
+from .mensajes_validacion import (
+    FORMATO_ANIO_EGRESO, FORMATO_FECHA_EXAMEN,
+    FORMATO_NOTA_EXAMEN, FORMATO_SEMESTRE_EGRESO,
+    FORMATO_BOOLEANO, FORMATO_EMAIL, FORMATO_ESTADO_COLEGIATURA, FORMATO_ROL,
+)
 from .models import Acta, CambioColegiatura, ConfiguracionSistema, DocumentoExpediente, Expediente, PerfilUsuario, RegistroAuditoria
 from .rut import normalizar_rut
 
 
 class CamposJsonEsperadosMixin:
-    """Informa las claves JSON desconocidas en vez de ignorarlas al guardar."""
+    """Informa las claves desconocidas en JSON y formularios de escritura."""
+
+    mensajes_campos = {}
+
+    def get_fields(self):
+        campos = super().get_fields()
+        for nombre, mensajes in self.mensajes_campos.items():
+            campo = campos[nombre]
+            campo.error_messages.update(mensajes)
+            for validador in campo.validators:
+                if isinstance(validador, MaxLengthValidator) and "max_length" in mensajes:
+                    validador.message = mensajes["max_length"]
+                elif isinstance(validador, MinLengthValidator) and "min_length" in mensajes:
+                    validador.message = mensajes["min_length"]
+                elif isinstance(validador, EmailValidator) and "invalid" in mensajes:
+                    validador.message = mensajes["invalid"]
+        return campos
 
     def to_internal_value(self, data):
         request = self.context.get("request")
-        if request and request.content_type.split(";", 1)[0].lower() == "application/json" and isinstance(data, Mapping):
+        if request and isinstance(data, Mapping):
             escribibles = {campo.field_name for campo in self._writable_fields}
-            extras = set(data) - escribibles
+            extras = set(data) - escribibles - {"csrfmiddlewaretoken"}
             if extras:
-                raise serializers.ValidationError({
+                try:
+                    super().to_internal_value(data)
+                except serializers.ValidationError as error:
+                    errores = dict(error.detail)
+                else:
+                    errores = {}
+                errores.update({
                     nombre: ["Campo no admitido por este endpoint."] for nombre in sorted(extras)
                 })
+                raise serializers.ValidationError(errores)
         return super().to_internal_value(data)
 
 
@@ -38,9 +74,38 @@ def validar_nombre_persona(valor):
     return valor
 
 
+def mensajes_texto(etiqueta, maximo=None):
+    mensajes = {
+        "required": f"Indique {etiqueta}.",
+        "null": f"Indique {etiqueta}; no use null.",
+        "blank": f"Indique {etiqueta}; no puede quedar vacío.",
+    }
+    if maximo is not None:
+        mensajes["max_length"] = f"{etiqueta.capitalize()} no puede superar {maximo} caracteres."
+    return mensajes
+
+
 class CuentaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
-    email = serializers.EmailField(source="usuario.email")
+    mensajes_campos = {
+        "email": {**mensajes_texto("un correo electrónico", 254), "invalid": FORMATO_EMAIL},
+        "password": mensajes_texto("una contraseña"),
+        "nombre": mensajes_texto("el nombre de la persona", 180),
+        "rol": {
+            "invalid_choice": FORMATO_ROL,
+            "null": FORMATO_ROL,
+            "required": "Indique un rol: administrador, coordinador o estudiante.",
+        },
+        "activo": {"invalid": FORMATO_BOOLEANO, "null": FORMATO_BOOLEANO},
+    }
+    email = serializers.EmailField(source="usuario.email", max_length=254)
     password = serializers.CharField(write_only=True, required=False, style={"input_type": "password"})
+    expediente = serializers.PrimaryKeyRelatedField(
+        queryset=Expediente.objects.all(), required=False, allow_null=True,
+        error_messages={
+            "does_not_exist": "No existe un expediente con el ID {pk_value}.",
+            "incorrect_type": "Indique un ID de expediente entero.",
+        },
+    )
 
     class Meta:
         model = PerfilUsuario
@@ -57,11 +122,17 @@ class CuentaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
             raise serializers.ValidationError("Ya existe una cuenta con este correo.")
         return email
 
+    def validate_nombre(self, valor):
+        return validar_nombre_persona(valor)
+
     def validate(self, attrs):
         if self.instance is None and not attrs.get("password"):
             raise serializers.ValidationError({"password": "Indique una contraseña inicial."})
         if attrs.get("password"):
-            validate_password(attrs["password"])
+            try:
+                validate_password(attrs["password"])
+            except DjangoValidationError as error:
+                raise serializers.ValidationError({"password": error.messages}) from error
         rol = attrs.get("rol", getattr(self.instance, "rol", None))
         expediente = attrs.get("expediente", getattr(self.instance, "expediente", None))
         if rol != PerfilUsuario.Rol.ESTUDIANTE and expediente:
@@ -100,20 +171,40 @@ class CuentaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
         return instance
 
 
-class ImportarCuentasSerializer(serializers.Serializer):
+class ImportarCuentasSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
+    mensajes_campos = {
+        "archivo": {
+            "required": "Adjunte el archivo CSV de cuentas.",
+            "null": "Adjunte el archivo CSV de cuentas.",
+            "invalid": "Adjunte un archivo CSV real; una URL o texto no es un archivo.",
+            "empty": "El archivo CSV no puede estar vacío.",
+        },
+    }
     archivo = serializers.FileField()
 
 
 class CambiarClaveSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
+    mensajes_campos = {
+        "clave_actual": mensajes_texto("la contraseña actual"),
+        "clave_nueva": mensajes_texto("la contraseña nueva"),
+    }
     clave_actual = serializers.CharField(style={"input_type": "password"})
     clave_nueva = serializers.CharField(style={"input_type": "password"})
 
     def validate_clave_nueva(self, valor):
-        validate_password(valor, user=self.context["request"].user)
+        try:
+            validate_password(valor, user=self.context["request"].user)
+        except DjangoValidationError as error:
+            raise serializers.ValidationError(error.messages) from error
         return valor
 
 
 class ConfiguracionSistemaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
+    mensajes_campos = {
+        "mantenimiento": {"invalid": FORMATO_BOOLEANO, "null": FORMATO_BOOLEANO},
+        "mensaje": {"null": "El mensaje debe ser texto; use una cadena vacía para quitarlo.",
+                    "max_length": "El mensaje no puede superar 300 caracteres."},
+    }
     class Meta:
         model = ConfiguracionSistema
         fields = ["mantenimiento", "mensaje", "actualizado"]
@@ -130,13 +221,65 @@ class PerfilUsuarioSerializer(serializers.ModelSerializer):
 
 
 class ExpedienteSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
+    mensajes_campos = {
+        "nombre": mensajes_texto("el nombre del estudiante", 180),
+        "rut": mensajes_texto("el RUT del estudiante", 12),
+        "anio_egreso": {"required": "Indique el año de egreso.",
+                         "max_string_length": FORMATO_ANIO_EGRESO},
+        "semestre_egreso": {"required": "Indique el semestre de egreso (1 o 2)."},
+        "fecha_examen": {"required": "Indique la fecha del examen en formato AAAA-MM-DD.",
+                         "datetime": FORMATO_FECHA_EXAMEN},
+        "nota_examen": {
+            "required": "Indique la nota del examen.",
+            "max_digits": FORMATO_NOTA_EXAMEN,
+            "max_whole_digits": FORMATO_NOTA_EXAMEN,
+            "max_string_length": FORMATO_NOTA_EXAMEN,
+        },
+        "profesor_guia": mensajes_texto("el nombre del profesor guía", 180),
+        "informante_1": mensajes_texto("el nombre del primer informante", 180),
+        "informante_2": mensajes_texto("el nombre del segundo informante", 180),
+        "informante_adicional": {
+            "null": "El nombre del informante adicional debe ser texto; use una cadena vacía para quitarlo.",
+            "max_length": "El nombre del informante adicional no puede superar 180 caracteres.",
+        },
+    }
     acta_id = serializers.IntegerField(source="acta.id", read_only=True)
     estudiante = PerfilUsuarioSerializer(source="perfil_estudiante", read_only=True)
     creado_por = serializers.CharField(source="creado_por.username", read_only=True)
     # La normalización se realiza antes de validar el formato y la unicidad del RUT.
     rut = serializers.CharField(max_length=12)
+    anio_egreso = serializers.IntegerField(
+        min_value=2020, max_value=2050,
+        error_messages={
+            "invalid": FORMATO_ANIO_EGRESO,
+            "min_value": "El año de egreso debe estar entre 2020 y 2050.",
+            "max_value": "El año de egreso debe estar entre 2020 y 2050.",
+            "null": "Indique el año de egreso.",
+        },
+    )
+    semestre_egreso = serializers.ChoiceField(
+        choices=Expediente._meta.get_field("semestre_egreso").choices,
+        error_messages={
+            "invalid_choice": FORMATO_SEMESTRE_EGRESO,
+            "null": "Indique el semestre de egreso (1 o 2).",
+        },
+    )
+    fecha_examen = serializers.DateField(
+        input_formats=["%Y-%m-%d"], format="%Y-%m-%d",
+        error_messages={
+            "invalid": FORMATO_FECHA_EXAMEN,
+            "null": "Indique la fecha del examen en formato AAAA-MM-DD.",
+        },
+    )
     nota_examen = serializers.DecimalField(
-        max_digits=2, decimal_places=1, min_value=Decimal("1.0"), max_value=Decimal("7.0")
+        max_digits=2, decimal_places=1, min_value=Decimal("1.0"), max_value=Decimal("7.0"),
+        error_messages={
+            "invalid": FORMATO_NOTA_EXAMEN,
+            "max_decimal_places": "Use como máximo un decimal en la nota del examen.",
+            "min_value": "La nota del examen debe estar entre 1,0 y 7,0.",
+            "max_value": "La nota del examen debe estar entre 1,0 y 7,0.",
+            "null": "Indique la nota del examen.",
+        },
     )
     profesor_guia = serializers.CharField(max_length=180, validators=[validar_nombre_persona])
     informante_1 = serializers.CharField(max_length=180, validators=[validar_nombre_persona])
@@ -170,23 +313,57 @@ class ExpedienteSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer
     def validate(self, attrs):
         # La comisión de examen no puede repetir a un docente en dos puestos.
         campos = ("profesor_guia", "informante_1", "informante_2", "informante_adicional")
-        nombres = [attrs.get(campo, getattr(self.instance, campo, "")) for campo in campos]
-        presentes = [
-            "".join(
+        vistos = set()
+        repetidos = {}
+        for campo in campos:
+            nombre = attrs.get(campo, getattr(self.instance, campo, ""))
+            if not nombre.strip():
+                continue
+            normalizado = "".join(
                 letra for letra in unicodedata.normalize("NFD", " ".join(nombre.split()).casefold())
                 if not unicodedata.combining(letra)
             ).strip()
-            for nombre in nombres if nombre.strip()
-        ]
-        if len(presentes) != len(set(presentes)):
-            raise serializers.ValidationError("Un docente aparece más de una vez en la comisión.")
+            if normalizado in vistos:
+                repetidos[campo] = "Este docente ya figura en la comisión."
+            vistos.add(normalizado)
+        if repetidos:
+            raise serializers.ValidationError(repetidos)
         return attrs
-class ActaSerializer(serializers.ModelSerializer):
+class ActaSerializer(CamposJsonEsperadosMixin, serializers.ModelSerializer):
+    mensajes_campos = {
+        "expediente": {
+            "required": "Indique el ID del expediente al que pertenece el acta.",
+            "null": "Indique el ID del expediente al que pertenece el acta.",
+        },
+        "archivo": {
+            "null": "Adjunte un PDF o envíe archivo_base64 en JSON.",
+            "empty": "El PDF del acta no puede estar vacío.",
+            "max_length": "El nombre del PDF es demasiado largo.",
+        },
+        "archivo_base64": {
+            "null": "Envíe el contenido Base64 del PDF como texto.",
+            "blank": "Envíe el contenido Base64 del PDF; no puede estar vacío.",
+        },
+    }
     cargada_por = serializers.CharField(source="cargada_por.username", read_only=True)
+    archivo = serializers.FileField(required=False, error_messages={
+        "invalid": "Adjunte un archivo PDF real en el formulario; una URL o texto JSON no es un archivo.",
+    })
+    archivo_base64 = serializers.CharField(
+        write_only=True, required=False,
+        help_text="Para Raw data con application/json: contenido Base64 del PDF, sin prefijo data:.",
+    )
+    expediente = serializers.PrimaryKeyRelatedField(
+        queryset=Expediente.objects.all(),
+        error_messages={
+            "does_not_exist": "No existe un expediente con el ID {pk_value}.",
+            "incorrect_type": "Indique un ID de expediente entero.",
+        },
+    )
 
     class Meta:
         model = Acta
-        fields = ["id", "expediente", "archivo", "nombre_original", "fecha_carga", "cargada_por"]
+        fields = ["id", "expediente", "archivo", "archivo_base64", "nombre_original", "fecha_carga", "cargada_por"]
         read_only_fields = ["nombre_original", "fecha_carga", "cargada_por"]
 
     def validate_archivo(self, archivo):
@@ -205,6 +382,32 @@ class ActaSerializer(serializers.ModelSerializer):
         if existentes.exists():
             raise serializers.ValidationError("Este expediente ya tiene un acta; edite la existente.")
         return expediente
+
+    def validate(self, attrs):
+        codificado = attrs.pop("archivo_base64", None)
+        if "archivo" in attrs and codificado is not None:
+            raise serializers.ValidationError({
+                "archivo_base64": "Envíe solo archivo o archivo_base64, no ambos."
+            })
+        if codificado is not None:
+            limite = 10 * 1024 * 1024
+            if len(codificado) > 4 * ((limite + 2) // 3):
+                raise serializers.ValidationError({"archivo_base64": "El PDF debe ser menor de 10 MB."})
+            try:
+                contenido = base64.b64decode(codificado, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise serializers.ValidationError({
+                    "archivo_base64": "Ingrese Base64 válido del PDF, sin prefijo data:."
+                }) from error
+            try:
+                attrs["archivo"] = self.validate_archivo(ContentFile(contenido, name="acta.pdf"))
+            except serializers.ValidationError as error:
+                raise serializers.ValidationError({"archivo_base64": error.detail}) from error
+        if self.instance is None and "archivo" not in attrs:
+            raise serializers.ValidationError({
+                "archivo": "Adjunte un PDF o envíe archivo_base64 en JSON."
+            })
+        return attrs
 
     def create(self, validated_data):
         archivo = validated_data["archivo"]
@@ -235,6 +438,70 @@ class CargaDocumentosSerializer(serializers.Serializer):
     )
 
 
+class DocumentoBase64Serializer(CamposJsonEsperadosMixin, serializers.Serializer):
+    mensajes_campos = {
+        "nombre": mensajes_texto("el nombre del archivo", 255),
+        "contenido_base64": mensajes_texto("el contenido Base64 del archivo"),
+        "expediente": {
+            "required": "Indique el ID del expediente de este archivo.",
+            "null": "Indique el ID del expediente de este archivo.",
+        },
+    }
+    expediente = serializers.PrimaryKeyRelatedField(
+        queryset=Expediente.objects.all(),
+        error_messages={
+            "does_not_exist": "No existe un expediente con el ID {pk_value}.",
+            "incorrect_type": "Indique un ID de expediente entero.",
+        },
+    )
+    nombre = serializers.CharField(max_length=255)
+    contenido_base64 = serializers.CharField()
+
+    def validate_nombre(self, valor):
+        if "/" in valor or "\\" in valor:
+            raise serializers.ValidationError("Indique solo el nombre del archivo, sin carpetas.")
+        if Path(valor).suffix.lower() not in EXTENSIONES:
+            raise serializers.ValidationError("Formato no admitido. Use PDF, DOCX, XLSX, PNG, JPG, TXT o CSV.")
+        return valor
+
+    def validate(self, attrs):
+        codificado = attrs.pop("contenido_base64")
+        if len(codificado) > 4 * ((MAX_BYTES_ARCHIVO + 2) // 3):
+            raise serializers.ValidationError({
+                "contenido_base64": "Cada archivo debe ser menor de 10 MB."
+            })
+        try:
+            contenido = base64.b64decode(codificado, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise serializers.ValidationError({
+                "contenido_base64": "Ingrese Base64 válido, sin prefijo data:."
+            }) from error
+        archivo = SimpleUploadedFile(attrs.pop("nombre"), contenido)
+        try:
+            validar_documento(archivo)
+        except serializers.ValidationError as error:
+            raise serializers.ValidationError({
+                "contenido_base64": error.detail["archivos"]
+            }) from error
+        attrs["archivo"] = archivo
+        return attrs
+
+
+class CargaMasivaJsonSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
+    mensajes_campos = {
+        "archivos": {
+            "required": "Envíe al menos un archivo.",
+            "null": "Envíe una lista de archivos.",
+            "not_a_list": "archivos debe ser una lista de objetos con expediente, nombre y contenido_base64.",
+            "min_length": "Envíe al menos un archivo.",
+            "max_length": f"Envíe como máximo {MAX_ARCHIVOS} archivos.",
+        },
+    }
+    archivos = serializers.ListField(
+        child=DocumentoBase64Serializer(), min_length=1, max_length=MAX_ARCHIVOS,
+    )
+
+
 class CargaDocumentosExpedienteSerializer(serializers.Serializer):
     archivos = serializers.ListField(
         child=serializers.FileField(), min_length=1, max_length=20,
@@ -251,6 +518,17 @@ class CambioColegiaturaSerializer(serializers.ModelSerializer):
 
 
 class NuevoEstadoColegiaturaSerializer(CamposJsonEsperadosMixin, serializers.Serializer):
+    mensajes_campos = {
+        "estado_nuevo": {
+            "required": "Indique el nuevo estado de colegiatura.",
+            "null": FORMATO_ESTADO_COLEGIATURA,
+            "invalid_choice": FORMATO_ESTADO_COLEGIATURA,
+        },
+        "observacion": {
+            "null": "La observación debe ser texto; use una cadena vacía si no hay observación.",
+            "max_length": "La observación no puede superar 1000 caracteres.",
+        },
+    }
     estado_nuevo = serializers.ChoiceField(choices=Expediente.EstadoColegiatura.choices)
     observacion = serializers.CharField(required=False, allow_blank=True, max_length=1000)
 

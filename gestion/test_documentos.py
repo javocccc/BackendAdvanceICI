@@ -1,3 +1,4 @@
+import base64
 from datetime import date
 from io import BytesIO
 import shutil
@@ -81,6 +82,73 @@ class DocumentosAPITests(TestCase):
         self.assertEqual(DocumentoExpediente.objects.count(), 4)
         self.assertEqual(DocumentoExpediente.objects.filter(tipo="docx").count(), 1)
 
+    def test_carga_masiva_json_base64_guarda_archivos_en_sus_expedientes(self):
+        contenido = b"%PDF-1.4\ncontenido"
+        codificado = base64.b64encode(contenido).decode("ascii")
+        respuesta = self.client.post("/api/documentos/carga-masiva/", {
+            "archivos": [
+                {"expediente": self.uno.pk, "nombre": "uno.pdf", "contenido_base64": codificado},
+                {"expediente": self.dos.pk, "nombre": "dos.pdf", "contenido_base64": codificado},
+            ],
+        }, format="json")
+        self.assertEqual(respuesta.status_code, 201, respuesta.data)
+        self.assertEqual([item["expediente"] for item in respuesta.data], [self.uno.pk, self.dos.pk])
+        self.assertEqual(DocumentoExpediente.objects.count(), 2)
+        for item in respuesta.data:
+            documento = DocumentoExpediente.objects.get(pk=item["id"])
+            with documento.archivo.open("rb") as guardado:
+                self.assertEqual(guardado.read(), contenido)
+
+    def test_carga_masiva_json_rechaza_lote_invalido_sin_guardar(self):
+        valido = base64.b64encode(b"%PDF-1.4\ncontenido").decode("ascii")
+        base = {"expediente": self.uno.pk, "nombre": "uno.pdf", "contenido_base64": valido}
+        casos = (
+            ({"expediente": 9999, "nombre": "dos.pdf", "contenido_base64": valido},
+             "No existe un expediente con el ID 9999"),
+            ({"expediente": "hola", "nombre": "dos.pdf", "contenido_base64": valido},
+             "ID de expediente entero"),
+            ({"expediente": self.dos.pk, "nombre": "dos.pdf", "contenido_base64": "no-base64!"},
+             "Base64 válido"),
+            ({"expediente": self.dos.pk, "nombre": "dos.pdf", "contenido_base64": "aG9sYQ=="},
+             "contenido no corresponde"),
+            ({"expediente": self.dos.pk, "nombre": "programa.exe", "contenido_base64": valido},
+             "Formato no admitido"),
+        )
+        for segundo, mensaje in casos:
+            with self.subTest(segundo=segundo):
+                respuesta = self.client.post("/api/documentos/carga-masiva/", {
+                    "archivos": [base, segundo],
+                }, format="json")
+                self.assertEqual(respuesta.status_code, 400, respuesta.data)
+                self.assertIn(mensaje, str(respuesta.data))
+                self.assertEqual(DocumentoExpediente.objects.count(), 0)
+
+        for datos, mensaje in (
+            ({"archivos": "texto"}, "debe ser una lista"),
+            ({"archivos": []}, "al menos un archivo"),
+            ({"archivos": [{**base, "id": 50}]}, "Campo no admitido"),
+        ):
+            with self.subTest(datos=datos):
+                respuesta = self.client.post("/api/documentos/carga-masiva/", datos, format="json")
+                self.assertEqual(respuesta.status_code, 400, respuesta.data)
+                self.assertIn(mensaje, str(respuesta.data))
+                self.assertEqual(DocumentoExpediente.objects.count(), 0)
+
+        respuesta = self.client.generic(
+            "POST", "/api/documentos/carga-masiva/",
+            b'{"archivos": [{"expediente": hola}]}', content_type="application/json",
+        )
+        self.assertEqual(respuesta.status_code, 400, respuesta.data)
+        self.assertIn("expediente", str(respuesta.data["detail"]))
+
+    def test_carga_masiva_raw_data_muestra_json_y_plantilla(self):
+        respuesta = self.client.get("/api/documentos/carga-masiva/", HTTP_ACCEPT="text/html")
+        self.assertEqual(respuesta.status_code, 200, respuesta.content[:500])
+        contenido = respuesta.content.decode()
+        self.assertIn('value="application/json" selected', contenido)
+        self.assertIn('&quot;contenido_base64&quot;: &quot;&quot;', contenido)
+        self.assertIn('type="file" multiple', contenido)
+
     def test_formulario_acepta_ids_separados_por_comas(self):
         respuesta = self.client.post("/api/documentos/carga-masiva/", {
             "expedientes": f"{self.uno.pk}, {self.dos.pk}",
@@ -132,6 +200,8 @@ class DocumentosAPITests(TestCase):
                     "archivos": [archivo("a.pdf"), archivo("b.pdf")],
                 }, format="multipart")
                 self.assertEqual(respuesta.status_code, 400, respuesta.data)
+                if "9999" in ids:
+                    self.assertIn("9999", str(respuesta.data["expedientes"]))
         self.assertEqual(DocumentoExpediente.objects.count(), 0)
 
     def test_estudiante_solo_consulta_sus_documentos(self):

@@ -4,25 +4,46 @@ from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import filters, generics, mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import ParseError, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import SAFE_METHODS
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from .documentos import MAX_ARCHIVOS, validar_documento
+from .formato_raw import (
+    ActaBrowsableAPIRenderer, AdjuntosMultiPartParser, CargaMasivaBrowsableAPIRenderer,
+    JSONActaParser, JSONCargaMasivaParser, JSONColegiaturaParser, JSONExpedienteParser,
+)
 from .models import Acta, CambioColegiatura, DocumentoExpediente, Expediente, PerfilUsuario, RegistroAuditoria
 from .permissions import PermisoActa, PermisoExpediente
 from .serializers import (
     ActaSerializer, CambioColegiaturaSerializer, CargaDocumentosExpedienteSerializer,
-    CargaDocumentosSerializer, DocumentoExpedienteSerializer, ExpedienteSerializer,
+    CargaDocumentosSerializer, CargaMasivaJsonSerializer,
+    DocumentoExpedienteSerializer, ExpedienteSerializer,
     NuevoEstadoColegiaturaSerializer, PerfilUsuarioSerializer, RegistroAuditoriaSerializer,
 )
+
+class ActaMultiPartParser(MultiPartParser):
+    def parse(self, stream, media_type=None, parser_context=None):
+        try:
+            return super().parse(stream, media_type=media_type, parser_context=parser_context)
+        except ParseError as error:
+            if "boundary" in str(error).lower():
+                raise ParseError(
+                    "El cuerpo multipart/form-data no tiene un separador válido. "
+                    "Para cargar un acta, use el formulario y adjunte un PDF; "
+                    "no pegue JSON en Raw data con este media type."
+                ) from error
+            raise
+
 
 class ActaViewSet(viewsets.ModelViewSet):
     serializer_class = ActaSerializer
     permission_classes = [PermisoActa]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [JSONActaParser, ActaMultiPartParser, FormParser]
+    renderer_classes = [JSONRenderer, ActaBrowsableAPIRenderer]
     filterset_fields = ["expediente"]
 
     def get_queryset(self):
@@ -30,8 +51,8 @@ class ActaViewSet(viewsets.ModelViewSet):
         if not perfil or not perfil.activo:
             return Acta.objects.none()
         if perfil.rol == PerfilUsuario.Rol.ESTUDIANTE:
-            return Acta.objects.filter(expediente_id=perfil.expediente_id)
-        return Acta.objects.all()
+            return Acta.objects.filter(expediente_id=perfil.expediente_id).order_by("-fecha_carga", "-id")
+        return Acta.objects.all().order_by("-fecha_carga", "-id")
 
     def perform_create(self, serializer):
         acta = serializer.save(cargada_por=self.request.user)
@@ -65,6 +86,7 @@ class ActaViewSet(viewsets.ModelViewSet):
 class ExpedienteViewSet(viewsets.ModelViewSet):
     serializer_class = ExpedienteSerializer
     permission_classes = [PermisoExpediente]
+    parser_classes = [JSONExpedienteParser, FormParser, MultiPartParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ["colegiatura", "anio_egreso", "semestre_egreso"]
     search_fields = ["nombre", "rut", "profesor_guia"]
@@ -90,7 +112,11 @@ class ExpedienteViewSet(viewsets.ModelViewSet):
             expediente=expediente, usuario=self.request.user, accion="edicion", detalles="Expediente editado"
         )
 
-    @action(detail=True, methods=["post"], url_path="colegiatura", serializer_class=NuevoEstadoColegiaturaSerializer)
+    @action(
+        detail=True, methods=["post"], url_path="colegiatura",
+        serializer_class=NuevoEstadoColegiaturaSerializer,
+        parser_classes=[JSONColegiaturaParser, FormParser, MultiPartParser],
+    )
     def cambiar_colegiatura(self, request, pk=None):
         if request.user.perfil.rol != PerfilUsuario.Rol.ADMINISTRADOR:
             raise PermissionDenied("Solo Administración puede cambiar la colegiatura.")
@@ -101,7 +127,7 @@ class ExpedienteViewSet(viewsets.ModelViewSet):
             anterior = expediente.colegiatura
             nuevo = datos.validated_data["estado_nuevo"]
             if anterior == nuevo:
-                raise ValidationError("El estado nuevo debe ser distinto del actual.")
+                raise ValidationError({"estado_nuevo": "El estado nuevo debe ser distinto del actual."})
             expediente.colegiatura = nuevo
             expediente.fecha_colegiatura = timezone.localdate()
             expediente.save(update_fields=["colegiatura", "fecha_colegiatura", "fecha_actualizacion"])
@@ -129,7 +155,8 @@ class ExpedienteViewSet(viewsets.ModelViewSet):
 
     @action(
         detail=True, methods=["get", "post"], url_path="documentos",
-        parser_classes=[MultiPartParser, FormParser], serializer_class=CargaDocumentosExpedienteSerializer,
+        parser_classes=[AdjuntosMultiPartParser, FormParser],
+        serializer_class=CargaDocumentosExpedienteSerializer,
     )
     def documentos(self, request, pk=None):
         expediente = self.get_object()
@@ -167,8 +194,9 @@ class ResumenView(generics.GenericAPIView):
         return Response(datos)
 
 
-def cargar_documentos(request, expedientes, *, claves_permitidas):
-    archivos = request.FILES.getlist("archivos")
+def cargar_documentos(request, expedientes, *, claves_permitidas, archivos=None):
+    if archivos is None:
+        archivos = request.FILES.getlist("archivos")
     # La API navegable agrega este campo oculto para la protección CSRF.
     extras = set(request.data) - claves_permitidas - {"csrfmiddlewaretoken"}
     if extras:
@@ -212,7 +240,7 @@ class DocumentoExpedienteViewSet(
 ):
     serializer_class = DocumentoExpedienteSerializer
     permission_classes = [PermisoActa]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [AdjuntosMultiPartParser, FormParser]
     filterset_fields = ["expediente", "tipo"]
 
     def get_queryset(self):
@@ -223,10 +251,23 @@ class DocumentoExpedienteViewSet(
             return DocumentoExpediente.objects.filter(expediente_id=perfil.expediente_id)
         return DocumentoExpediente.objects.all()
 
-    @action(detail=False, methods=["get", "post"], url_path="carga-masiva", serializer_class=CargaDocumentosSerializer)
+    @action(
+        detail=False, methods=["get", "post"], url_path="carga-masiva",
+        serializer_class=CargaDocumentosSerializer,
+        parser_classes=[JSONCargaMasivaParser, AdjuntosMultiPartParser, FormParser],
+        renderer_classes=[JSONRenderer, CargaMasivaBrowsableAPIRenderer],
+    )
     def carga_masiva(self, request):
         if request.method == "GET":
             return Response({"archivos": [], "expedientes": ""})
+        if request.content_type.split(";", 1)[0].lower() == "application/json":
+            datos = CargaMasivaJsonSerializer(data=request.data, context={"request": request})
+            datos.is_valid(raise_exception=True)
+            items = datos.validated_data["archivos"]
+            return cargar_documentos(
+                request, [item["expediente"] for item in items],
+                archivos=[item["archivo"] for item in items], claves_permitidas={"archivos"},
+            )
         archivos = request.FILES.getlist("archivos")
         ids = request.data.getlist("expedientes")
         # El formulario navegable envía "1,2"; otros clientes repiten la clave.
@@ -237,8 +278,10 @@ class DocumentoExpedienteViewSet(
         if any(not valor.isdecimal() or int(valor) < 1 for valor in ids):
             raise ValidationError({"expedientes": "Cada identificador debe ser un entero positivo."})
         encontrados = Expediente.objects.in_bulk(int(valor) for valor in ids)
-        if len(encontrados) != len(set(map(int, ids))):
-            raise ValidationError({"expedientes": "Uno o más expedientes no existen."})
+        faltantes = sorted(set(map(int, ids)) - set(encontrados))
+        if faltantes:
+            lista = ", ".join(map(str, faltantes))
+            raise ValidationError({"expedientes": f"No existen expedientes con los ID: {lista}."})
         destinos = [encontrados[int(valor)] for valor in ids]
         return cargar_documentos(request, destinos, claves_permitidas={"archivos", "expedientes"})
 
